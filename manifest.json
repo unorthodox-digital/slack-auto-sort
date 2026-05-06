@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Slack Channel Auto-Sort",
+  "version": "1.2.0",
+  "description": "Auto-sorts new Slack channels into sidebar sections by name prefix",
+  "permissions": ["storage"],
+  "host_permissions": ["https://*.slack.com/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://app.slack.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://app.slack.com/*"],
+      "js": ["inject.js"],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Slack Auto-Sort"
+  }
+}

@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Slack Auto-Sort</title>
+<style>
+  body {
+    width: 380px;
+    padding: 18px;
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #1a1a2e;
+    color: #e0e0e0;
+  }
+  h2 {
+    font-size: 14px;
+    margin: 0 0 4px;
+    color: #a78bfa;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+  }
+  .subtitle {
+    font-size: 11px;
+    color: #888;
+    margin: 0 0 14px;
+  }
+  .rule {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 8px;
+    align-items: center;
+  }
+  .rule input {
+    flex: 1;
+    min-width: 0;
+    padding: 7px 9px;
+    border: 1px solid #2d3050;
+    border-radius: 5px;
+    background: #16213e;
+    color: #e0e0e0;
+    font-size: 12px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .rule input:focus {
+    outline: none;
+    border-color: #a78bfa;
+  }
+  .rule input::placeholder { color: #555; }
+  .arrow {
+    color: #a78bfa;
+    font-size: 14px;
+    flex-shrink: 0;
+    user-select: none;
+  }
+  .btn {
+    padding: 7px 12px;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: inherit;
+    transition: opacity 0.15s;
+  }
+  .btn:hover { opacity: 0.85; }
+  .btn-add {
+    background: #a78bfa;
+    color: #fff;
+    width: 100%;
+    margin-top: 6px;
+    font-weight: 500;
+  }
+  .btn-remove {
+    background: transparent;
+    color: #ff6b6b;
+    padding: 4px 8px;
+    font-size: 14px;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .btn-remove:hover { background: #ff6b6b22; }
+  .btn-save {
+    background: #4ecdc4;
+    color: #0a1410;
+    width: 100%;
+    margin-top: 12px;
+    font-weight: 600;
+  }
+  .status {
+    font-size: 11px;
+    color: #4ecdc4;
+    margin-top: 8px;
+    text-align: center;
+    min-height: 14px;
+  }
+  .info {
+    font-size: 11px;
+    color: #888;
+    margin-top: 14px;
+    line-height: 1.5;
+    padding-top: 12px;
+    border-top: 1px solid #2d3050;
+  }
+  .info code {
+    background: #16213e;
+    padding: 1px 5px;
+    border-radius: 3px;
+    color: #a78bfa;
+    font-size: 10.5px;
+  }
+</style>
+</head>
+<body>
+  <h2>Channel → Section Rules</h2>
+  <p class="subtitle">New channels matching a prefix get moved into the named sidebar section.</p>
+  <div id="rules"></div>
+  <button class="btn btn-add" id="add">+ Add Rule</button>
+  <button class="btn btn-save" id="save">Save Rules</button>
+  <div class="status" id="status"></div>
+  <div class="info">
+    Prefix matches the channel name (e.g. <code>vsl-</code> matches <code>vsl-client-a</code>).<br>
+    Section name must match a section already in your Slack sidebar — exact spelling.
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
