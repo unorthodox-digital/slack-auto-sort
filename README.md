@@ -8,7 +8,7 @@ Example: a channel called `vsl-newclient` gets moved into the **VSL** section au
 
 ## Install (one-time setup, ~30 seconds)
 
-1. **Download** the extension: ask Mher for the latest `slack-auto-sort.zip`, or grab it from the team drop link.
+1. **Download** the latest `slack-auto-sort-*.zip` from the [**Releases page**](https://github.com/unorthodox-digital/slack-auto-sort/releases/latest) — click the `.zip` under **Assets** (the newest version is always at the top).
 2. **Unzip** it somewhere you'll keep it (e.g. `~/Documents/slack-auto-sort/`). Don't delete the folder after — Chrome loads from it directly.
 3. Open Chrome and go to **`chrome://extensions`** (paste that into the address bar).
 4. Toggle **Developer mode** ON (top-right corner of the page).
@@ -41,6 +41,18 @@ Tweak them however you want.
 
 ---
 
+## Auto-read (optional — off by default)
+
+The extension can also keep noisy channels out of your **Activity** feed by marking them read for you every minute. This is **off until you turn it on**. Open the popup and you'll see three lists:
+
+- **Auto-Read Prefixes** — channels matching these get *all* messages marked read every minute.
+- **Auto-Read Invitations to:** — auto-clears "you were added to a channel" notices for matching prefixes.
+- **Auto-Read Broadcasts in:** — auto-clears `@channel` / `@here`, bot, and system messages in matching channels.
+
+Add the prefixes you want (e.g. `vsl-`), click **Save**, and reload Slack. Your direct **@-mentions always stay unread** — Slack still notifies you on those.
+
+---
+
 ## How it works (briefly)
 
 - Every 60 seconds, the extension reads your channel list from Slack's API and checks whether any channel's name starts with one of your prefixes but isn't already in the matching section. If it finds a mismatch, it moves the channel into the right section.
@@ -60,7 +72,7 @@ Tweak them however you want.
 - In Slack, right-click → Inspect → Console tab. Filter for `[auto-sort]`. You'll see lines like `Moved #vsl-newclient → VSL` when it acts.
 
 **Updating the extension.**
-- When a new version is available, replace the folder contents with the new files and click the **reload** icon for the extension on `chrome://extensions`.
+- Download the newest `.zip` from the [Releases page](https://github.com/unorthodox-digital/slack-auto-sort/releases/latest), unzip it, and replace the contents of your existing extension folder with the new files. Then click the **reload** icon (⟳) on the extension's card at `chrome://extensions`. Your saved rules are kept.
 
 ---
 

@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # Package the extension as a clean .zip for distribution.
 # Output: dist/slack-auto-sort-vX.Y.Z.zip
+#
+# IMPORTANT: the zip's contents are FLAT (no top-level folder). Windows's
+# "Extract All" creates a destination folder named after the zip and drops
+# the contents into it; if the zip itself contained a top-level folder of
+# the same name, you'd get the dreaded nested duplicate-folder layout that
+# breaks Chrome's "Load unpacked". Mac's Archive Utility likewise creates a
+# folder named after the zip when the contents are flat. Both platforms
+# end up at:  <Downloads>/slack-auto-sort-vX.Y.Z/manifest.json
 
 set -euo pipefail
 
@@ -22,9 +30,10 @@ cp popup.html    "${STAGE_DIR}/"
 cp popup.js      "${STAGE_DIR}/"
 cp README.md     "${STAGE_DIR}/"
 
-cd "${OUT_DIR}"
-zip -r "${NAME}.zip" "${NAME}" -x "*.DS_Store" >/dev/null
-rm -rf "${NAME}"
+# Zip the contents (`.`) of the staging dir, not the staging dir itself, so
+# the archive has no top-level folder.
+( cd "${STAGE_DIR}" && zip -r "../${NAME}.zip" . -x "*.DS_Store" >/dev/null )
+rm -rf "${STAGE_DIR}"
 
 echo "Built: ${OUT_DIR}/${NAME}.zip"
-ls -lh "${NAME}.zip"
+unzip -l "${OUT_DIR}/${NAME}.zip" | head -20

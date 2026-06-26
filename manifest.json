@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Slack Channel Auto-Sort",
-  "version": "1.2.0",
-  "description": "Auto-sorts new Slack channels into sidebar sections by name prefix",
+  "version": "1.3.4",
+  "description": "Auto-sorts new Slack channels into sidebar sections by name prefix, and optionally keeps prefix-matched channels marked as read",
   "permissions": ["storage"],
   "host_permissions": ["https://*.slack.com/*"],
   "content_scripts": [

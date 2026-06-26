@@ -19,10 +19,15 @@
     font-weight: 600;
     letter-spacing: 0.2px;
   }
+  .section + .section {
+    margin-top: 18px;
+    padding-top: 16px;
+    border-top: 1px solid #2d3050;
+  }
   .subtitle {
     font-size: 11px;
     color: #888;
-    margin: 0 0 14px;
+    margin: 0 0 12px;
   }
   .rule {
     display: flex;
@@ -82,7 +87,7 @@
     background: #4ecdc4;
     color: #0a1410;
     width: 100%;
-    margin-top: 12px;
+    margin-top: 16px;
     font-weight: 600;
   }
   .status {
@@ -110,15 +115,41 @@
 </style>
 </head>
 <body>
-  <h2>Channel → Section Rules</h2>
-  <p class="subtitle">New channels matching a prefix get moved into the named sidebar section.</p>
-  <div id="rules"></div>
-  <button class="btn btn-add" id="add">+ Add Rule</button>
-  <button class="btn btn-save" id="save">Save Rules</button>
+  <div class="section">
+    <h2>Channel → Section Rules</h2>
+    <p class="subtitle">New channels matching a prefix get moved into the named sidebar section.</p>
+    <div id="rules"></div>
+    <button class="btn btn-add" id="add-rule">+ Add Rule</button>
+  </div>
+
+  <div class="section">
+    <h2>Auto-Read Prefixes</h2>
+    <p class="subtitle">All messages in these channels get marked as read every minute — clears them from the Activity feed.</p>
+    <div id="autoread"></div>
+    <button class="btn btn-add" id="add-autoread">+ Add Prefix</button>
+  </div>
+
+  <div class="section">
+    <h2>Auto-Read Invitations to:</h2>
+    <p class="subtitle">When you're invited to a channel matching one of these prefixes, the invitation is auto-cleared. Real messages and @mentions in the channel stay unread.</p>
+    <div id="autoread-invites"></div>
+    <button class="btn btn-add" id="add-autoread-invite">+ Add Prefix</button>
+  </div>
+
+  <div class="section">
+    <h2>Auto-Read Broadcasts in:</h2>
+    <p class="subtitle">@channel / @here, bot messages, and system events get auto-cleared in these channels. Direct @-mentions to you stay unread.</p>
+    <div id="autoread-broadcasts"></div>
+    <button class="btn btn-add" id="add-autoread-broadcast">+ Add Prefix</button>
+  </div>
+
+  <button class="btn btn-save" id="save">Save</button>
   <div class="status" id="status"></div>
+
   <div class="info">
     Prefix matches the channel name (e.g. <code>vsl-</code> matches <code>vsl-client-a</code>).<br>
-    Section name must match a section already in your Slack sidebar — exact spelling.
+    Section name must match a section already in your Slack sidebar — exact spelling.<br>
+    Auto-read does not affect direct mentions — Slack still notifies you on those.
   </div>
   <script src="popup.js"></script>
 </body>
