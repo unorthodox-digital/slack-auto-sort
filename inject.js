@@ -14,7 +14,7 @@
 
   // Build marker — confirm which build is actually live on the page via console:
   //   document.documentElement.getAttribute("data-slack-autosort-version")
-  document.documentElement.setAttribute("data-slack-autosort-version", "1.3.4");
+  document.documentElement.setAttribute("data-slack-autosort-version", "1.3.5");
 
   const ATTR_RULES = "data-slack-autosort-rules";
   const ATTR_AUTOREAD = "data-slack-autosort-autoread";
@@ -43,6 +43,11 @@
   // Per-session cache: channel ID → epoch ms of last history fetch attempt.
   // Throttles re-fetching the same channel.
   const broadcastsLastFetched = new Map();
+  // Slack allows at most this many channels in one sidebar section. A section
+  // at the limit rejects every further insert with "too_many_channels". The
+  // pass has to name that section out loud, because the only cure is a human
+  // emptying it — retrying in silence looks like the extension is broken.
+  const SECTION_CHANNEL_LIMIT = 500;
 
   function isRateLimitError(e) {
     return e && /ratelimited/i.test(e.message || "");
@@ -159,13 +164,34 @@
     return result;
   }
 
+  // "Which section is this channel filed in" means user-created sections only.
+  // Slack also reports pseudo-sections (starred, channels, DMs, Slack Connect),
+  // and a channel can appear in one of those AND in a real section. Letting a
+  // pseudo-section win would hide the real source, the move would go out
+  // insert-only, and Slack would answer ok without moving anything. Standard
+  // sections only, so every id this map returns is safe to send on the remove
+  // side of a bulkUpdate.
   function getSectionChannelMap(sections) {
     const map = {};
     for (const s of sections) {
+      if (s.type !== "standard") continue;
       const ids = (s.channel_ids_page && s.channel_ids_page.channel_ids) || [];
       for (const cid of ids) map[cid] = s.channel_section_id;
     }
     return map;
+  }
+
+  // The only cure for a full section is a person emptying it, so say which
+  // section and how many channels are waiting. Silence here reads as "the
+  // extension stopped working".
+  function warnSectionsFull(deferred) {
+    for (const d of deferred) {
+      console.warn(
+        `[auto-sort] Section "${d.section}" is full at Slack's ${SECTION_CHANNEL_LIMIT}-channel ` +
+          `limit. ${d.n} channel${d.n === 1 ? "" : "s"} cannot be filed into it. ` +
+          `Remove or archive channels in "${d.section}" to make room.`
+      );
+    }
   }
 
   // Fetch the FULL channel list, paging through Slack's cursor pagination.
@@ -210,9 +236,19 @@
     const rules = getRules();
     if (!rules.length) return;
 
+    // Standard sections only, matching getSectionChannelMap. Slack's
+    // pseudo-sections carry ordinary-looking names ("Channels", "Agents",
+    // "Salesforce"), so indexing them here would let a rule resolve to a
+    // section the user cannot actually file into.
     const sectionByName = {};
+    const sectionNameById = {};
+    const sectionCounts = {};
     for (const s of sections) {
+      if (s.type !== "standard") continue;
       if (s.name) sectionByName[s.name.toLowerCase()] = s.channel_section_id;
+      sectionNameById[s.channel_section_id] = s.name;
+      sectionCounts[s.channel_section_id] =
+        (s.channel_ids_page && s.channel_ids_page.count) || 0;
     }
     const channelToSection = getSectionChannelMap(sections);
 
@@ -226,26 +262,66 @@
         console.warn(`[auto-sort] Section "${rule.section}" not found — skipping #${ch.name}`);
         continue;
       }
-      if (channelToSection[ch.id] === targetId) continue;
+      const currentId = channelToSection[ch.id];
+      if (currentId === targetId) continue;
       (moves[targetId] = moves[targetId] || []).push({
         id: ch.id,
         name: ch.name,
         target: rule.section,
+        from: currentId || null,
       });
     }
 
+    // Slack rejects the WHOLE bulkUpdate with too_many_channels if any one
+    // target section would pass its limit, so a single full section would
+    // block every unrelated move. Trim each target to the room it has right
+    // now. Channels moved OUT of a full section this pass free room, and the
+    // next poll files the rest. Room is measured against the CURRENT count,
+    // never against a count that assumes this call's own removals landed.
+    const deferred = [];
+    for (const sid of Object.keys(moves)) {
+      const room = Math.max(0, SECTION_CHANNEL_LIMIT - (sectionCounts[sid] || 0));
+      const items = moves[sid];
+      if (items.length <= room) continue;
+      deferred.push({
+        section: sectionNameById[sid] || sid,
+        n: items.length - room,
+      });
+      if (room > 0) moves[sid] = items.slice(0, room);
+      else delete moves[sid];
+    }
+
     const flat = Object.values(moves).flat();
-    if (!flat.length) return;
+    if (!flat.length) {
+      if (deferred.length) warnSectionsFull(deferred);
+      return;
+    }
+
+    // A channel that already sits in another section needs that section on the
+    // remove side. An insert alone does NOT move it: Slack keeps the existing
+    // membership and still answers ok, so the pass logs a move that never
+    // happened. Verified against the live workspace API on 2026-08-11 —
+    // insert-only left the channel in place, insert+remove moved it. Built
+    // from the SURVIVING moves only, so a channel deferred above is never
+    // pulled out of its current section and left loose.
+    const removals = {};
+    for (const m of flat) {
+      if (m.from) (removals[m.from] = removals[m.from] || []).push(m.id);
+    }
 
     const insert = Object.entries(moves).map(([sid, items]) => ({
       channel_section_id: sid,
       channel_ids: items.map((i) => i.id),
     }));
+    const remove = Object.entries(removals).map(([sid, ids]) => ({
+      channel_section_id: sid,
+      channel_ids: ids,
+    }));
 
     try {
       await slackApi(apiBase, teamId, token, "users.channelSections.channels.bulkUpdate", {
         insert: JSON.stringify(insert),
-        remove: JSON.stringify([]),
+        remove: JSON.stringify(remove),
         _x_reason: "channel-sidebar-channel-drop",
         _x_mode: "online",
         _x_sonic: "true",
@@ -254,8 +330,20 @@
       for (const m of flat) {
         console.log(`[auto-sort] Moved #${m.name} → ${m.target}`);
       }
+      if (deferred.length) warnSectionsFull(deferred);
     } catch (e) {
-      console.warn("[auto-sort] bulkUpdate failed:", e.message);
+      if (/too_many_channels/i.test(e.message || "")) {
+        // A target passed its limit even after the trim above, so Slack
+        // rejected the whole call and nothing moved. Report the sections at
+        // the limit rather than the raw error string.
+        const full = Object.keys(moves)
+          .filter((sid) => (sectionCounts[sid] || 0) >= SECTION_CHANNEL_LIMIT)
+          .map((sid) => ({ section: sectionNameById[sid] || sid, n: moves[sid].length }));
+        warnSectionsFull(full.length ? full : [{ section: "a target section", n: flat.length }]);
+        console.warn("[auto-sort] Nothing moved this pass.");
+      } else {
+        console.warn("[auto-sort] bulkUpdate failed:", e.message);
+      }
     }
   }
 
