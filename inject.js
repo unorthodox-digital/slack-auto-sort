@@ -14,7 +14,7 @@
 
   // Build marker — confirm which build is actually live on the page via console:
   //   document.documentElement.getAttribute("data-slack-autosort-version")
-  document.documentElement.setAttribute("data-slack-autosort-version", "1.3.5");
+  document.documentElement.setAttribute("data-slack-autosort-version", "1.4.0");
 
   const ATTR_RULES = "data-slack-autosort-rules";
   const ATTR_AUTOREAD = "data-slack-autosort-autoread";
@@ -637,6 +637,107 @@
     }
   }
 
+  // ── Thread replies in the three approved channels ────────────────────────
+  //
+  // Slack keeps read state per THREAD, separately from the channel, so a
+  // channel this extension marks read still shows unread thread replies.
+  // Mher approved clearing those in vsl-, funnel- and systems- channels,
+  // with one exception that is not negotiable: a reply naming him directly
+  // stays unread.
+  //
+  // The selection is in thread-select.js, which is pure and tested against a
+  // recorded client.counts response. If that file failed to load, this pass
+  // does nothing rather than guessing.
+  const ThreadSelect =
+    (typeof globalThis !== "undefined" && globalThis.SlackAutoSortThreadSelect) || null;
+
+  // ⚠ NOT VERIFIED AGAINST LIVE SLACK.
+  //
+  // A read-only probe on 2026-08-20 confirmed `subscriptions.thread.mark`
+  // exists (empty arguments come back `invalid_arguments`, not
+  // `unknown_method`) and that `client.counts` carries the thread unread and
+  // thread mention maps this pass reads. It did NOT confirm the mark call's
+  // parameter names, because the only channel with unread threads at the
+  // time sat outside the three approved prefixes, and the probe session was
+  // then frozen after an incident that is now on Mher's queue.
+  //
+  // TODO(pending Mher's go): once he answers that queue row, verify
+  // `subscriptions.thread.mark` against ONE live thread inside vsl-, funnel-
+  // or systems- that names nobody, confirm the parameter names below, then
+  // flip THREAD_MARK_VERIFIED to true. Until then this pass selects, logs
+  // what it WOULD clear, and writes nothing.
+  const THREAD_MARK_VERIFIED = false;
+
+  // The only write this feature makes, and it is per thread. There is a
+  // workspace-wide "clear every thread" call in Slack's API; it is banned
+  // here and must never appear in this codebase — it would clear threads in
+  // every channel, including ones naming Mher, and it cannot be undone.
+  // tests/no-banned-call.test.js enforces its absence.
+  async function markThreadRead(apiBase, teamId, token, channelId, threadTs, lastRead) {
+    return slackApi(apiBase, teamId, token, "subscriptions.thread.mark", {
+      channel: channelId,
+      thread_ts: threadTs,
+      ts: lastRead,
+    });
+  }
+
+  async function threadAutoReadPass(apiBase, teamId, token, channels) {
+    if (!ThreadSelect) {
+      console.warn("[thread-read] selection module missing; doing nothing.");
+      return;
+    }
+
+    let counts;
+    try {
+      counts = await slackApi(apiBase, teamId, token, "client.counts", {
+        thread_counts_by_channel: "true",
+        org_wide_aware: "true",
+      });
+    } catch (e) {
+      return;   // no counts means no proof of what is safe: clear nothing
+    }
+
+    // A smoke test, NOT a security boundary. This file and thread-select.js
+    // both run in Slack's MAIN world, so a hostile page script could define
+    // the global before us or pass a Proxy, and any check we write runs in
+    // the world it would be defending against. It catches an accidentally
+    // widened list, which is the realistic failure. The real protection
+    // today is that the write below is off.
+    //
+    // TODO(before enabling): move this selection into the ISOLATED world
+    // (content.js) and bridge only the result, so page scripts cannot reach
+    // it at all.
+    const prefixes = ThreadSelect.THREAD_PREFIXES;
+    const intact =
+      Array.isArray(prefixes) &&
+      prefixes.length === 3 &&
+      prefixes[0] === "vsl-" &&
+      prefixes[1] === "funnel-" &&
+      prefixes[2] === "systems-";
+    if (!intact) {
+      console.warn("[thread-read] allowlist is not the approved three; doing nothing.");
+      return;
+    }
+
+    const eligible = ThreadSelect.selectThreadChannels(counts, channels);
+    if (!Array.isArray(eligible) || !eligible.length) return;
+
+    if (!THREAD_MARK_VERIFIED) {
+      console.log(
+        `[thread-read] ${eligible.length} channel(s) eligible ` +
+          `(${eligible.join(", ")}); marking is OFF until ` +
+          `subscriptions.thread.mark is verified against a live thread.`
+      );
+      return;
+    }
+
+    // Reached only after the TODO above is closed. Enumerating the unread
+    // threads in a channel needs its own verified read call; that lands with
+    // the same live check, so it is deliberately not guessed here.
+    console.warn("[thread-read] enumeration not implemented; see TODO.");
+    void markThreadRead;
+  }
+
   // Clears "X archived the channel Y" notices from the Activity feed. They
   // arrive as generic_system_alert items (category CHANNEL) and pile up after a
   // bulk-archive — channel-level mark-read can't touch them, they have a
@@ -715,6 +816,13 @@
     await autoReadPass(apiBase, teamId, token, state.channels);
     await autoReadInvitesPass(apiBase, teamId, token, state.channels, myUserId);
     await autoReadBroadcastsPass(apiBase, teamId, token, state.channels, myUserId);
+    // Boxed: this pass is new and pollOnce has no per-pass boundary, so a
+    // throw here would skip the archive sweep and reject the whole poll.
+    try {
+      await threadAutoReadPass(apiBase, teamId, token, state.channels);
+    } catch (e) {
+      console.warn("[thread-read] pass failed:", e && e.message);
+    }
     await clearArchiveNoticesPass(apiBase, teamId, token);
   }
 

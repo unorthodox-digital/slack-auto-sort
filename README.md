@@ -53,6 +53,23 @@ Add the prefixes you want (e.g. `vsl-`), click **Save**, and reload Slack. Your 
 
 ---
 
+## Thread replies (not live yet)
+
+Slack tracks unread state per thread, separately from the channel, so a channel
+this extension marks read can still show unread thread replies.
+
+Clearing those is built but switched OFF. When it is turned on it will apply to
+`vsl-`, `funnel-` and `systems-` channels only — that list is hardcoded, not
+configurable — and any channel with a thread reply mentioning you is skipped
+whole. Every unknown leaves threads unread: no counts, no mention data, an
+unrecognised channel.
+
+It stays off until `subscriptions.thread.mark` is verified against one live
+thread. See the TODO in `inject.js`.
+
+Tests: `node --test tests/*.test.js`. There is a workspace-wide "clear every
+thread" call in Slack's API; it is banned here and a test keeps it out.
+
 ## How it works (briefly)
 
 - Every 60 seconds, the extension reads your channel list from Slack's API and checks whether any channel's name starts with one of your prefixes but isn't already in the matching section. If it finds a mismatch, it moves the channel into the right section.
