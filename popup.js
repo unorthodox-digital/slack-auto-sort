@@ -2,6 +2,7 @@ const DEFAULT_RULES = [
   { prefix: "vsl-", section: "VSL" },
   { prefix: "systems-", section: "Systems" },
   { prefix: "funnel-", section: "Funnel Build" },
+  { prefix: "internal-", section: "Internal" },
 ];
 
 const DEFAULT_AUTOREAD = [];

@@ -1,0 +1,41 @@
+# The floor: no new explicit `any` in a TypeScript file, no new source file over
+# 500 lines, judged only on the files this pull request changes against its base
+# branch. A ratchet, not a repo-wide rule: app/app.js is 7,170 lines and stays
+# legal until somebody splits it. The same script runs in every repo Mher builds
+# in; the copy of record is Internal-Team-Dashboard's scripts/lint-floor.mjs.
+#
+# This repo has no package.json. The script needs `typescript` only when a .ts
+# file changed, so it is installed here without writing a lockfile or a manifest.
+# Pull requests only: a push to main has no base branch to compare against.
+
+name: Floor
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: floor-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  floor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The merge base with the base branch needs history, not a tarball.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: TypeScript parser for the any check
+        run: npm install --no-save --no-audit --no-fund --no-package-lock typescript@5
+
+      - name: Floor
+        run: node scripts/lint-floor.mjs --base "origin/${{ github.base_ref }}"
