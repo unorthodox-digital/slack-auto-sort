@@ -58,6 +58,21 @@
     return parseFloat(targetTs) > parseFloat(lastRead);
   }
 
+  // Page order is measured, not documented: with oldest=last_read,
+  // conversations.history returns the OLDEST page after last_read, not
+  // the newest, so a leading unread run is always on this page even when
+  // has_more is set. When has_more is true, confirm the page's oldest
+  // message is the first message after last_read before trusting it.
+  async function pageStartsAtLastRead(apiBase, teamId, token, channelId, lastRead, page) {
+    if (!page.has_more) return true;
+    const probe = await slackApi(apiBase, teamId, token, "conversations.history", {
+      channel: channelId,
+      oldest: lastRead,
+      limit: "1",
+    });
+    return probe.messages[0].ts === page.messages[page.messages.length - 1].ts;
+  }
+
   function getRules() {
     const raw = document.documentElement.getAttribute(ATTR_RULES);
     if (!raw) return [];
@@ -565,9 +580,7 @@
           oldest: lastRead,
           limit: "50",
         });
-        // Unread window is larger than this fetch — fail closed and retry
-        // next poll rather than mark a ts that might sit below an unseen mention.
-        if (hist.has_more) {
+        if (hist.has_more && !(await pageStartsAtLastRead(apiBase, teamId, token, ch.id, lastRead, hist))) {
           broadcastsLastFetched.delete(ch.id);
           continue;
         }
@@ -638,9 +651,9 @@
           oldest: lastRead,
           limit: "30",
         });
-        // Unread window is larger than this fetch — fail closed, do not
-        // remember the channel as cleared, retry when the window shrinks.
-        if (hist.has_more) continue;
+        if (hist.has_more && !(await pageStartsAtLastRead(apiBase, teamId, token, ch.id, lastRead, hist))) {
+          continue;
+        }
         const joinTs = selectInviteTarget(hist.messages || [], myUserId);
         if (!joinTs) {
           // No invitation in the unread window — remember so we don't
