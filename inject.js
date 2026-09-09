@@ -14,7 +14,7 @@
 
   // Build marker — confirm which build is actually live on the page via console:
   //   document.documentElement.getAttribute("data-slack-autosort-version")
-  document.documentElement.setAttribute("data-slack-autosort-version", "1.3.5");
+  document.documentElement.setAttribute("data-slack-autosort-version", "1.3.6");
 
   const ATTR_RULES = "data-slack-autosort-rules";
   const ATTR_AUTOREAD = "data-slack-autosort-autoread";
@@ -22,8 +22,6 @@
   const ATTR_AUTOREAD_BROADCASTS = "data-slack-autosort-autoread-broadcasts";
   const POLL_INTERVAL_MS = 60000;
   const BOOT_DELAY_MS = 5000;
-  const INVITE_HISTORY_LIMIT = 30;
-  const BROADCAST_HISTORY_LIMIT = 50;
   const JOIN_SUBTYPES = new Set(["channel_join", "group_join"]);
   const BROADCAST_TEXT_RE = /<!channel>|<!here>|<!everyone>/;
 
@@ -51,6 +49,28 @@
 
   function isRateLimitError(e) {
     return e && /ratelimited/i.test(e.message || "");
+  }
+
+  // conversations.mark moves the read marker BACKWARDS when given a ts
+  // older than last_read (Slack's own "Mark unread" uses the same call).
+  // Invitation and broadcast passes must never do that.
+  function forwardOnly(targetTs, lastRead) {
+    return parseFloat(targetTs) > parseFloat(lastRead);
+  }
+
+  // Page order is measured, not documented: with oldest=last_read,
+  // conversations.history returns the OLDEST page after last_read, not
+  // the newest, so a leading unread run is always on this page even when
+  // has_more is set. When has_more is true, confirm the page's oldest
+  // message is the first message after last_read before trusting it.
+  async function pageStartsAtLastRead(apiBase, teamId, token, channelId, lastRead, page) {
+    if (!page.has_more) return true;
+    const probe = await slackApi(apiBase, teamId, token, "conversations.history", {
+      channel: channelId,
+      oldest: lastRead,
+      limit: "1",
+    });
+    return probe.messages[0].ts === page.messages[page.messages.length - 1].ts;
   }
 
   function getRules() {
@@ -253,13 +273,14 @@
     const channelToSection = getSectionChannelMap(sections);
 
     const moves = {};
+    const missingSections = {};
     for (const ch of channels) {
       if (ch.is_archived) continue; // never move archived channels into sections
       const rule = matchRule(rules, ch.name);
       if (!rule) continue;
       const targetId = sectionByName[rule.section.toLowerCase()];
       if (!targetId) {
-        console.warn(`[auto-sort] Section "${rule.section}" not found — skipping #${ch.name}`);
+        missingSections[rule.section] = (missingSections[rule.section] || 0) + 1;
         continue;
       }
       const currentId = channelToSection[ch.id];
@@ -270,6 +291,10 @@
         target: rule.section,
         from: currentId || null,
       });
+    }
+
+    for (const [section, n] of Object.entries(missingSections)) {
+      console.warn(`[auto-sort] Section "${section}" not found — skipping ${n} channel(s)`);
     }
 
     // Slack rejects the WHOLE bulkUpdate with too_many_channels if any one
@@ -386,25 +411,27 @@
   }
 
   // One call returns every channel's unread state — the same source Slack's own
-  // client uses for badge counts. Lets the auto-read pass touch only channels
-  // that actually need marking, instead of blasting conversations.mark at every
-  // matching channel each poll (which instantly rate-limits the whole pass).
-  // Returns a Set of unread channel IDs, or null if the call failed (caller
-  // falls back to a capped sweep).
-  async function fetchUnreadChannelIds(apiBase, teamId, token) {
+  // client uses for badge counts. Shared by all three auto-read passes so a
+  // poll never hits client.counts more than once. Returns a Map of channel id
+  // → { has_unreads, mention_count, last_read }, or null if the call failed.
+  async function fetchCountsById(apiBase, teamId, token) {
     try {
       const r = await slackApi(apiBase, teamId, token, "client.counts", {});
-      const ids = new Set();
+      const map = new Map();
       for (const c of r.channels || []) {
-        if (c.has_unreads || (c.mention_count || 0) > 0) ids.add(c.id);
+        map.set(c.id, {
+          has_unreads: !!c.has_unreads,
+          mention_count: c.mention_count || 0,
+          last_read: c.last_read,
+        });
       }
-      return ids;
+      return map;
     } catch (e) {
       return null;
     }
   }
 
-  async function autoReadPass(apiBase, teamId, token, channels) {
+  async function autoReadPass(apiBase, teamId, token, channels, countsById) {
     const prefixes = getAutoReadPrefixes();
     if (!prefixes.length) return;
 
@@ -415,9 +442,13 @@
 
     // Narrow to channels that are ACTUALLY unread. Without this the pass marks
     // every matching channel every poll and 429s itself into doing nothing.
-    const unread = await fetchUnreadChannelIds(apiBase, teamId, token);
-    const usedCounts = unread !== null;
-    if (usedCounts) matches = matches.filter((ch) => unread.has(ch.id));
+    const usedCounts = countsById !== null;
+    if (usedCounts) {
+      matches = matches.filter((ch) => {
+        const c = countsById.get(ch.id);
+        return c && (c.has_unreads || (c.mention_count || 0) > 0);
+      });
+    }
 
     console.log(
       `[auto-read] ${matches.length} channel(s) to mark ` +
@@ -449,26 +480,20 @@
     }
   }
 
-  async function findOwnJoinTs(apiBase, teamId, token, channelId, myUserId) {
-    const hist = await slackApi(apiBase, teamId, token, "conversations.history", {
-      channel: channelId,
-      limit: String(INVITE_HISTORY_LIMIT),
-    });
-    const messages = hist.messages || [];
-    // Slack returns messages newest-first. Iterate in arrival order (oldest →
-    // newest) so we pick the EARLIEST own-join in the window — that's the
-    // invitation system message; later messages are real content the user
-    // cares about.
-    const oldestFirst = messages.slice().reverse();
+  // Unread messages arrive newest-first. Walk oldest → newest and take the
+  // leading run of join/group_join system messages. If that run contains the
+  // user's own join, return that ts; a join sitting behind a human or bot
+  // message is not an invitation we can clear without also marking real
+  // content.
+  function selectInviteTarget(unreadMessagesNewestFirst, myUserId) {
+    const oldestFirst = (unreadMessagesNewestFirst || []).slice().reverse();
+    const run = [];
     for (const m of oldestFirst) {
-      if (
-        JOIN_SUBTYPES.has(m.subtype) &&
-        m.user === myUserId
-      ) {
-        return m.ts;
-      }
+      if (!JOIN_SUBTYPES.has(m.subtype)) break;
+      run.push(m);
     }
-    return null;
+    const own = run.find((m) => m.user === myUserId);
+    return own ? own.ts : null;
   }
 
   function isUserMention(m, myUserId) {
@@ -498,44 +523,38 @@
     return false;
   }
 
-  async function findReadableBroadcastTs(apiBase, teamId, token, channelId, myUserId) {
-    const hist = await slackApi(apiBase, teamId, token, "conversations.history", {
-      channel: channelId,
-      limit: String(BROADCAST_HISTORY_LIMIT),
-    });
-    const messages = hist.messages || [];
-
-    // Pass 1: floor = oldest direct @-user mention's ts in window. Anything at
-    // or above this floor must NOT be marked, to preserve the unread mention.
-    let floor = Infinity;
-    for (const m of messages) {
-      if (isUserMention(m, myUserId)) {
-        const ts = parseFloat(m.ts);
-        if (ts < floor) floor = ts;
-      }
+  // Unread messages arrive newest-first. If Slack says the channel has an
+  // unread mention but none of the visible unread messages contain it, the
+  // mention sits past our history window — fail closed. Otherwise walk
+  // oldest → newest and stop at the first non-broadcast; the last ts in
+  // that leading run is as far as we can mark without touching real content.
+  function selectBroadcastTarget(unreadMessagesNewestFirst, myUserId, mentionCount) {
+    const messages = unreadMessagesNewestFirst || [];
+    if (mentionCount > 0 && !messages.some((m) => isUserMention(m, myUserId))) {
+      return null;
     }
-
-    // Pass 2: highest broadcast ts strictly below the floor.
-    let target = null;
-    let targetNum = -Infinity;
-    for (const m of messages) {
-      if (!isBroadcast(m, myUserId)) continue;
-      const ts = parseFloat(m.ts);
-      if (ts < floor && ts > targetNum) {
-        target = m.ts;
-        targetNum = ts;
-      }
+    const oldestFirst = messages.slice().reverse();
+    let lastTs = null;
+    for (const m of oldestFirst) {
+      if (!isBroadcast(m, myUserId)) break;
+      lastTs = m.ts;
     }
-    return target;
+    return lastTs;
   }
 
-  async function autoReadBroadcastsPass(apiBase, teamId, token, channels, myUserId) {
+  async function autoReadBroadcastsPass(apiBase, teamId, token, channels, myUserId, countsById) {
     const prefixes = getAutoReadBroadcastPrefixes();
     if (!prefixes.length) return;
+    if (countsById === null) {
+      console.warn("[auto-read-broadcast] client.counts unavailable; skipping this poll.");
+      return;
+    }
 
-    const matches = channels.filter(
-      (ch) => ch.name && matchesAutoRead(prefixes, ch.name)
-    );
+    const matches = channels.filter((ch) => {
+      if (!ch.name || !matchesAutoRead(prefixes, ch.name)) return false;
+      const c = countsById.get(ch.id);
+      return c && c.has_unreads === true;
+    });
     if (!matches.length) return;
 
     const now = Date.now();
@@ -554,8 +573,24 @@
       processed++;
 
       try {
-        const targetTs = await findReadableBroadcastTs(apiBase, teamId, token, ch.id, myUserId);
+        const counts = countsById.get(ch.id);
+        const lastRead = counts && counts.last_read;
+        const hist = await slackApi(apiBase, teamId, token, "conversations.history", {
+          channel: ch.id,
+          oldest: lastRead,
+          limit: "50",
+        });
+        if (hist.has_more && !(await pageStartsAtLastRead(apiBase, teamId, token, ch.id, lastRead, hist))) {
+          broadcastsLastFetched.delete(ch.id);
+          continue;
+        }
+        const targetTs = selectBroadcastTarget(
+          hist.messages || [],
+          myUserId,
+          counts && counts.mention_count
+        );
         if (!targetTs) continue;
+        if (!forwardOnly(targetTs, lastRead)) continue;
         if (broadcastsLastMarked.get(ch.id) === targetTs) continue; // no new broadcast
         await slackApi(apiBase, teamId, token, "conversations.mark", {
           channel: ch.id,
@@ -584,16 +619,21 @@
     }
   }
 
-  async function autoReadInvitesPass(apiBase, teamId, token, channels, myUserId) {
+  async function autoReadInvitesPass(apiBase, teamId, token, channels, myUserId, countsById) {
     const prefixes = getAutoReadInvitePrefixes();
     if (!prefixes.length || !myUserId) return;
+    if (countsById === null) {
+      console.warn("[auto-read-invite] client.counts unavailable; skipping this poll.");
+      return;
+    }
 
-    const matches = channels.filter(
-      (ch) =>
-        ch.name &&
-        !invitationsCleared.has(ch.id) &&
-        matchesAutoRead(prefixes, ch.name)
-    );
+    const matches = channels.filter((ch) => {
+      if (!ch.name || invitationsCleared.has(ch.id) || !matchesAutoRead(prefixes, ch.name)) {
+        return false;
+      }
+      const c = countsById.get(ch.id);
+      return c && c.has_unreads === true;
+    });
     if (!matches.length) return;
 
     let processed = 0;
@@ -604,19 +644,31 @@
       if (processed >= HISTORY_MAX_PER_POLL) break;
       processed++;
       try {
-        const joinTs = await findOwnJoinTs(apiBase, teamId, token, ch.id, myUserId);
+        const counts = countsById.get(ch.id);
+        const lastRead = counts && counts.last_read;
+        const hist = await slackApi(apiBase, teamId, token, "conversations.history", {
+          channel: ch.id,
+          oldest: lastRead,
+          limit: "30",
+        });
+        if (hist.has_more && !(await pageStartsAtLastRead(apiBase, teamId, token, ch.id, lastRead, hist))) {
+          continue;
+        }
+        const joinTs = selectInviteTarget(hist.messages || [], myUserId);
         if (!joinTs) {
-          // No invitation visible (likely already past its history window) —
-          // mark as handled so we don't re-fetch every poll.
+          // No invitation in the unread window — remember so we don't
+          // re-fetch every poll.
           invitationsCleared.add(ch.id);
           continue;
         }
-        await slackApi(apiBase, teamId, token, "conversations.mark", {
-          channel: ch.id,
-          ts: joinTs,
-        });
+        if (forwardOnly(joinTs, lastRead)) {
+          await slackApi(apiBase, teamId, token, "conversations.mark", {
+            channel: ch.id,
+            ts: joinTs,
+          });
+          cleared++;
+        }
         invitationsCleared.add(ch.id);
-        cleared++;
       } catch (e) {
         if (isRateLimitError(e)) {
           // Don't add to cleared set; will retry on next poll.
@@ -712,9 +764,19 @@
       return;
     }
     await sortPass(apiBase, teamId, token, state.sections, state.channels);
-    await autoReadPass(apiBase, teamId, token, state.channels);
-    await autoReadInvitesPass(apiBase, teamId, token, state.channels, myUserId);
-    await autoReadBroadcastsPass(apiBase, teamId, token, state.channels, myUserId);
+
+    let countsById = null;
+    if (
+      getAutoReadPrefixes().length ||
+      getAutoReadInvitePrefixes().length ||
+      getAutoReadBroadcastPrefixes().length
+    ) {
+      countsById = await fetchCountsById(apiBase, teamId, token);
+    }
+
+    await autoReadPass(apiBase, teamId, token, state.channels, countsById);
+    await autoReadInvitesPass(apiBase, teamId, token, state.channels, myUserId, countsById);
+    await autoReadBroadcastsPass(apiBase, teamId, token, state.channels, myUserId, countsById);
     await clearArchiveNoticesPass(apiBase, teamId, token);
   }
 
@@ -793,4 +855,5 @@
   }
 
   init();
+  if (globalThis.__SLACK_AUTOSORT_TEST__) globalThis.__slackAutoSortTestHooks = { selectInviteTarget, selectBroadcastTarget, forwardOnly, isBroadcast };
 })();

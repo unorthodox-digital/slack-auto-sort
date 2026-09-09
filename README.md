@@ -49,7 +49,7 @@ The extension can also keep noisy channels out of your **Activity** feed by mark
 - **Auto-Read Invitations to:** — auto-clears "you were added to a channel" notices for matching prefixes.
 - **Auto-Read Broadcasts in:** — auto-clears `@channel` / `@here`, bot, and system messages in matching channels.
 
-Add the prefixes you want (e.g. `vsl-`), click **Save**, and reload Slack. Your direct **@-mentions always stay unread** — Slack still notifies you on those.
+Add the prefixes you want (e.g. `vsl-`), click **Save**, and reload Slack. The **Auto-Read Prefixes** list marks everything in those channels read, direct mentions included, so it is for channels you never need to read. The **Invitations** and **Broadcasts** lists never touch a direct @-mention and only ever move your read position forward, so a message you already read never comes back as unread.
 
 ---
 
