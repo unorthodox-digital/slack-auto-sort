@@ -15,6 +15,8 @@
   const ATTR_AUTOREAD = "data-slack-autosort-autoread";
   const ATTR_AUTOREAD_INVITES = "data-slack-autosort-autoread-invites";
   const ATTR_AUTOREAD_BROADCASTS = "data-slack-autosort-autoread-broadcasts";
+  const ATTR_VSL_CAPACITY_CLEANUP = "data-slack-autosort-vsl-capacity-cleanup";
+  const ATTR_LAST_RESULT = "data-slack-autosort-last-result";
 
   const DEFAULT_RULES = [
     { prefix: "vsl-", section: "VSL" },
@@ -26,12 +28,17 @@
   const DEFAULT_AUTOREAD = [];
   const DEFAULT_AUTOREAD_INVITES = [];
   const DEFAULT_AUTOREAD_BROADCASTS = [];
+  const DEFAULT_VSL_CAPACITY_CLEANUP = false;
 
-  function publish(rules, autoRead, autoReadInvites, autoReadBroadcasts) {
+  function publish(rules, autoRead, autoReadInvites, autoReadBroadcasts, vslCapacityCleanup) {
     document.documentElement.setAttribute(ATTR_RULES, JSON.stringify(rules));
     document.documentElement.setAttribute(ATTR_AUTOREAD, JSON.stringify(autoRead));
     document.documentElement.setAttribute(ATTR_AUTOREAD_INVITES, JSON.stringify(autoReadInvites));
     document.documentElement.setAttribute(ATTR_AUTOREAD_BROADCASTS, JSON.stringify(autoReadBroadcasts));
+    document.documentElement.setAttribute(
+      ATTR_VSL_CAPACITY_CLEANUP,
+      vslCapacityCleanup ? "true" : "false"
+    );
   }
 
   function loadAll() {
@@ -42,6 +49,7 @@
           autoReadPrefixes: DEFAULT_AUTOREAD,
           autoReadInvitePrefixes: DEFAULT_AUTOREAD_INVITES,
           autoReadBroadcastPrefixes: DEFAULT_AUTOREAD_BROADCASTS,
+          vslCapacityCleanup: DEFAULT_VSL_CAPACITY_CLEANUP,
         },
         (data) => resolve(data)
       );
@@ -53,10 +61,11 @@
       data.rules,
       data.autoReadPrefixes,
       data.autoReadInvitePrefixes,
-      data.autoReadBroadcastPrefixes
+      data.autoReadBroadcastPrefixes,
+      data.vslCapacityCleanup === true
     );
     console.log(
-      `[auto-sort/bridge] Published ${data.rules.length} sort rules, ${data.autoReadPrefixes.length} full-auto-read, ${data.autoReadInvitePrefixes.length} invite-auto-read, ${data.autoReadBroadcastPrefixes.length} broadcast-auto-read.`
+      `[auto-sort/bridge] Published ${data.rules.length} sort rules, ${data.autoReadPrefixes.length} full-auto-read, ${data.autoReadInvitePrefixes.length} invite-auto-read, ${data.autoReadBroadcastPrefixes.length} broadcast-auto-read, vsl-capacity-cleanup=${data.vslCapacityCleanup === true}.`
     );
   });
 
@@ -65,7 +74,8 @@
       changes.rules ||
       changes.autoReadPrefixes ||
       changes.autoReadInvitePrefixes ||
-      changes.autoReadBroadcastPrefixes
+      changes.autoReadBroadcastPrefixes ||
+      changes.vslCapacityCleanup
     ) {
       chrome.storage.sync.get(
         {
@@ -73,17 +83,33 @@
           autoReadPrefixes: DEFAULT_AUTOREAD,
           autoReadInvitePrefixes: DEFAULT_AUTOREAD_INVITES,
           autoReadBroadcastPrefixes: DEFAULT_AUTOREAD_BROADCASTS,
+          vslCapacityCleanup: DEFAULT_VSL_CAPACITY_CLEANUP,
         },
         (data) => {
           publish(
             data.rules,
             data.autoReadPrefixes,
             data.autoReadInvitePrefixes,
-            data.autoReadBroadcastPrefixes
+            data.autoReadBroadcastPrefixes,
+            data.vslCapacityCleanup === true
           );
           console.log("[auto-sort/bridge] Config updated; republished.");
         }
       );
     }
+  });
+
+  const resultObserver = new MutationObserver(() => {
+    const raw = document.documentElement.getAttribute(ATTR_LAST_RESULT);
+    if (!raw) return;
+    try {
+      chrome.storage.local.set({ lastSortResult: JSON.parse(raw) });
+    } catch (e) {
+      // Ignore malformed status payloads.
+    }
+  });
+  resultObserver.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: [ATTR_LAST_RESULT],
   });
 })();

@@ -53,10 +53,18 @@ Add the prefixes you want (e.g. `vsl-`), click **Save**, and reload Slack. The *
 
 ---
 
+## VSL capacity cleanup (optional — off by default)
+
+Slack caps a sidebar section at 500 channels. When the **VSL** section is full, new `vsl-` channels stay unsorted until something leaves. If you turn this on in the popup, the extension waits until it can name 100 joined, non-archived `vsl-` channels already in VSL, then leaves the oldest 100 (by the channel's `created` time) so the same poll — or the next safe pass — can file the ones waiting. It never leaves a channel outside VSL or whose name does not start with `vsl-`, and it will not leave a partial batch if it cannot identify 100. The popup shows the latest full-section or cleanup result so you do not need DevTools.
+
+This is **off until you turn it on**. Existing installs stay off until you check the box and click Save.
+
+---
+
 ## How it works (briefly)
 
 - Every 60 seconds, the extension reads your channel list from Slack's API and checks whether any channel's name starts with one of your prefixes but isn't already in the matching section. If it finds a mismatch, it moves the channel into the right section.
-- It only moves channels — it never creates, archives, leaves, or deletes anything.
+- By default it only moves channels — it never creates, archives, leaves, or deletes anything. With **VSL capacity cleanup** on, it may leave the oldest 100 `vsl-` channels already in VSL when that section is at Slack's 500-channel limit.
 - The section must already exist in your Slack sidebar. The extension won't create a section for you. (If a rule references a section that doesn't exist yet, it'll log a warning and skip those channels.)
 
 ---
@@ -67,6 +75,9 @@ Add the prefixes you want (e.g. `vsl-`), click **Save**, and reload Slack. The *
 - Make sure the section name in the rule matches your Slack sidebar exactly — spelling and capitalization both matter.
 - Make sure the section exists in your Slack sidebar already. Create it manually first if needed.
 - Reload the Slack tab. The extension polls every 60s after a 5s boot delay.
+
+**Open the popup to see the latest result.**
+- The popup shows whether VSL was full or whether a capacity cleanup ran, so you do not need DevTools for that. Console lines still show each move and each leave.
 
 **Open the browser console to see what it's doing.**
 - In Slack, right-click → Inspect → Console tab. Filter for `[auto-sort]`. You'll see lines like `Moved #vsl-newclient → VSL` when it acts.

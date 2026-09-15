@@ -8,12 +8,15 @@ const DEFAULT_RULES = [
 const DEFAULT_AUTOREAD = [];
 const DEFAULT_AUTOREAD_INVITES = [];
 const DEFAULT_AUTOREAD_BROADCASTS = [];
+const DEFAULT_VSL_CAPACITY_CLEANUP = false;
 
 const rulesContainer = document.getElementById("rules");
 const autoreadContainer = document.getElementById("autoread");
 const autoreadInvitesContainer = document.getElementById("autoread-invites");
 const autoreadBroadcastsContainer = document.getElementById("autoread-broadcasts");
 const statusEl = document.getElementById("status");
+const cleanupToggle = document.getElementById("vsl-capacity-cleanup");
+const lastResultEl = document.getElementById("last-result");
 
 function escape(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({
@@ -49,6 +52,22 @@ function createPrefixRow(prefix) {
   return div;
 }
 
+function formatLastResult(result) {
+  if (!result || typeof result !== "object") return "";
+  if (result.kind === "cleanup") {
+    const failed = result.failed == null ? 0 : result.failed;
+    const rate = result.stoppedOnRateLimit ? "; stopped on rate limit" : "";
+    return `VSL cleanup: left ${result.left}, ${failed} failed${rate}.`;
+  }
+  if (result.kind === "full") {
+    const waiting = result.waiting == null ? 0 : result.waiting;
+    const limit = result.limit == null ? 500 : result.limit;
+    const section = result.section || "VSL";
+    return `Section "${section}" is full at Slack's ${limit}-channel limit. ${waiting} channel${waiting === 1 ? "" : "s"} waiting.`;
+  }
+  return "";
+}
+
 function loadAll() {
   chrome.storage.sync.get(
     {
@@ -56,6 +75,7 @@ function loadAll() {
       autoReadPrefixes: DEFAULT_AUTOREAD,
       autoReadInvitePrefixes: DEFAULT_AUTOREAD_INVITES,
       autoReadBroadcastPrefixes: DEFAULT_AUTOREAD_BROADCASTS,
+      vslCapacityCleanup: DEFAULT_VSL_CAPACITY_CLEANUP,
     },
     (data) => {
       rulesContainer.innerHTML = "";
@@ -66,9 +86,19 @@ function loadAll() {
       data.autoReadInvitePrefixes.forEach((p) => autoreadInvitesContainer.appendChild(createPrefixRow(p)));
       autoreadBroadcastsContainer.innerHTML = "";
       data.autoReadBroadcastPrefixes.forEach((p) => autoreadBroadcastsContainer.appendChild(createPrefixRow(p)));
+      cleanupToggle.checked = data.vslCapacityCleanup === true;
     }
   );
+  chrome.storage.local.get({ lastSortResult: null }, (data) => {
+    lastResultEl.textContent = formatLastResult(data.lastSortResult);
+  });
 }
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.lastSortResult) {
+    lastResultEl.textContent = formatLastResult(changes.lastSortResult.newValue);
+  }
+});
 
 document.getElementById("add-rule").onclick = () => {
   rulesContainer.appendChild(createRuleRow({ prefix: "", section: "" }));
@@ -106,8 +136,10 @@ document.getElementById("save").onclick = () => {
     .map((row) => row.querySelector(".prefix").value.trim().toLowerCase())
     .filter((p) => p);
 
+  const vslCapacityCleanup = cleanupToggle.checked === true;
+
   chrome.storage.sync.set(
-    { rules, autoReadPrefixes, autoReadInvitePrefixes, autoReadBroadcastPrefixes },
+    { rules, autoReadPrefixes, autoReadInvitePrefixes, autoReadBroadcastPrefixes, vslCapacityCleanup },
     () => {
       statusEl.textContent = `Saved: ${rules.length} sort, ${autoReadPrefixes.length} full, ${autoReadInvitePrefixes.length} invites, ${autoReadBroadcastPrefixes.length} broadcasts.`;
       setTimeout(() => (statusEl.textContent = ""), 2500);

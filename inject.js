@@ -14,14 +14,17 @@
 
   // Build marker — confirm which build is actually live on the page via console:
   //   document.documentElement.getAttribute("data-slack-autosort-version")
-  document.documentElement.setAttribute("data-slack-autosort-version", "1.3.6");
+  document.documentElement.setAttribute("data-slack-autosort-version", "1.4.0");
 
   const ATTR_RULES = "data-slack-autosort-rules";
   const ATTR_AUTOREAD = "data-slack-autosort-autoread";
   const ATTR_AUTOREAD_INVITES = "data-slack-autosort-autoread-invites";
   const ATTR_AUTOREAD_BROADCASTS = "data-slack-autosort-autoread-broadcasts";
+  const ATTR_VSL_CAPACITY_CLEANUP = "data-slack-autosort-vsl-capacity-cleanup";
+  const ATTR_LAST_RESULT = "data-slack-autosort-last-result";
   const POLL_INTERVAL_MS = 60000;
   const BOOT_DELAY_MS = 5000;
+  const LEAVE_PACE_MS = 250;
   const JOIN_SUBTYPES = new Set(["channel_join", "group_join"]);
   const BROADCAST_TEXT_RE = /<!channel>|<!here>|<!everyone>/;
 
@@ -113,6 +116,18 @@
       return Array.isArray(arr) ? arr.map((p) => String(p).toLowerCase()).filter(Boolean) : [];
     } catch (e) {
       return [];
+    }
+  }
+
+  function getVslCapacityCleanupEnabled() {
+    return document.documentElement.getAttribute(ATTR_VSL_CAPACITY_CLEANUP) === "true";
+  }
+
+  function publishLastResult(result) {
+    try {
+      document.documentElement.setAttribute(ATTR_LAST_RESULT, JSON.stringify(result));
+    } catch (e) {
+      // Ignore a read-only document in odd test / extension hosts.
     }
   }
 
@@ -214,6 +229,111 @@
     }
   }
 
+  const VSL_CAPACITY_PREFIX = "vsl-";
+  const VSL_CAPACITY_SECTION = "vsl";
+  const VSL_CAPACITY_BATCH = 100;
+
+  // Opt-in VSL overflow policy: only when the standard VSL section is at
+  // Slack's 500-channel limit, and only among joined, non-archived vsl-
+  // channels already in that section. Oldest known `created` first, id
+  // tie-break. A missing, non-finite, zero, or negative `created` is not
+  // treated as old — that channel is ineligible. Fail closed — return no
+  // IDs — unless we can name a full batch of 100 known-age channels.
+  function hasKnownCreated(ch) {
+    const n = Number(ch && ch.created);
+    return Number.isFinite(n) && n > 0;
+  }
+
+  function planVslCapacityCleanup(sections, channels, enabled) {
+    if (!enabled) return { leaveIds: [] };
+
+    const vslSection = (sections || []).find(
+      (s) => s.type === "standard" && s.name && String(s.name).toLowerCase() === VSL_CAPACITY_SECTION
+    );
+    if (!vslSection) return { leaveIds: [] };
+
+    const page = vslSection.channel_ids_page || {};
+    const ids = page.channel_ids || [];
+    const count = page.count || 0;
+    if (count < SECTION_CHANNEL_LIMIT) return { leaveIds: [] };
+
+    const byId = new Map();
+    for (const ch of channels || []) {
+      if (ch && ch.id) byId.set(ch.id, ch);
+    }
+
+    const eligible = [];
+    for (const id of ids) {
+      const ch = byId.get(id);
+      if (!ch) continue;
+      if (ch.is_archived) continue;
+      if (ch.is_member === false) continue;
+      const name = String(ch.name || "").toLowerCase();
+      if (!name.startsWith(VSL_CAPACITY_PREFIX)) continue;
+      if (!hasKnownCreated(ch)) continue;
+      eligible.push(ch);
+    }
+
+    if (eligible.length < VSL_CAPACITY_BATCH) {
+      return {
+        leaveIds: [],
+        skipReason: "insufficient_eligible",
+        eligibleCount: eligible.length,
+        requiredBatch: VSL_CAPACITY_BATCH,
+      };
+    }
+
+    eligible.sort((a, b) => {
+      const ca = Number(a.created);
+      const cb = Number(b.created);
+      if (ca !== cb) return ca - cb;
+      return String(a.id).localeCompare(String(b.id));
+    });
+
+    return { leaveIds: eligible.slice(0, VSL_CAPACITY_BATCH).map((ch) => ch.id) };
+  }
+
+  function hasVslCapacityRule(rules) {
+    return (rules || []).some(
+      (r) =>
+        r &&
+        String(r.prefix || "").toLowerCase() === VSL_CAPACITY_PREFIX &&
+        String(r.section || "").toLowerCase() === VSL_CAPACITY_SECTION
+    );
+  }
+
+  async function runVslCapacityCleanup(apiBase, teamId, token, leaveIds, channels) {
+    const names = new Map();
+    for (const ch of channels || []) {
+      if (ch && ch.id) names.set(ch.id, ch.name);
+    }
+    const failed = [];
+    let left = 0;
+    let stoppedOnRateLimit = false;
+    for (const id of leaveIds) {
+      const label = names.get(id) ? `#${names.get(id)}` : id;
+      try {
+        await slackApi(apiBase, teamId, token, "conversations.leave", { channel: id });
+        left++;
+        console.log(`[auto-sort] Left ${label} to free VSL capacity.`);
+      } catch (e) {
+        if (isRateLimitError(e)) {
+          stoppedOnRateLimit = true;
+          console.warn(`[auto-sort] Rate limited while leaving ${label}; stopping VSL cleanup.`);
+          break;
+        }
+        failed.push({ id, error: e.message });
+        console.warn(`[auto-sort] Leave failed for ${label}:`, e.message);
+      }
+      await new Promise((r) => setTimeout(r, LEAVE_PACE_MS));
+    }
+    console.log(
+      `[auto-sort] VSL capacity cleanup: left ${left}, ${failed.length} failed` +
+        `${stoppedOnRateLimit ? ", stopped on rate limit" : ""}.`
+    );
+    return { left, failed, stoppedOnRateLimit };
+  }
+
   // Fetch the FULL channel list, paging through Slack's cursor pagination.
   // users.conversations caps each page (~1000); a single fixed-limit call
   // silently truncated the list once the workspace grew past that, so the
@@ -243,7 +363,7 @@
 
   async function fetchState(apiBase, teamId, token) {
     const [secResp, channels] = await Promise.all([
-      slackApi(apiBase, teamId, token, "users.channelSections.list", {}),
+      slackApi(apiBase, teamId, token, "users.channelSections.list", { limit: "1000" }),
       fetchAllConversations(apiBase, teamId, token),
     ]);
     return {
@@ -254,7 +374,7 @@
 
   async function sortPass(apiBase, teamId, token, sections, channels) {
     const rules = getRules();
-    if (!rules.length) return;
+    if (!rules.length) return { deferred: [] };
 
     // Standard sections only, matching getSectionChannelMap. Slack's
     // pseudo-sections carry ordinary-looking names ("Channels", "Agents",
@@ -319,7 +439,7 @@
     const flat = Object.values(moves).flat();
     if (!flat.length) {
       if (deferred.length) warnSectionsFull(deferred);
-      return;
+      return { deferred };
     }
 
     // A channel that already sits in another section needs that section on the
@@ -370,6 +490,7 @@
         console.warn("[auto-sort] bulkUpdate failed:", e.message);
       }
     }
+    return { deferred };
   }
 
   async function markChannelRead(apiBase, teamId, token, channel) {
@@ -755,6 +876,12 @@
     }
   }
 
+  // Timer, tab focus, and the config observer can all enter pollOnce while
+  // another pass is still leaving. Two overlapping full-state reads would
+  // plan the same destructive batch. One cleanup at a time; a concurrent
+  // poll skips leaves and continues with the non-destructive sort pass.
+  let vslCleanupInFlight = false;
+
   async function pollOnce(apiBase, teamId, token, myUserId) {
     let state;
     try {
@@ -763,7 +890,68 @@
       console.warn("[auto-sort] API fetch failed:", e.message);
       return;
     }
-    await sortPass(apiBase, teamId, token, state.sections, state.channels);
+
+    const cleanupEnabled = getVslCapacityCleanupEnabled() && hasVslCapacityRule(getRules());
+    const plan = planVslCapacityCleanup(state.sections, state.channels, cleanupEnabled);
+    if (plan.skipReason === "insufficient_eligible") {
+      console.warn(
+        `[auto-sort] VSL capacity cleanup skipped: only ${plan.eligibleCount} eligible vsl- channels ` +
+          `in VSL (need ${plan.requiredBatch} known-age members for a full batch).`
+      );
+    }
+    let cleanupResult = null;
+    if (plan.leaveIds.length && !vslCleanupInFlight) {
+      vslCleanupInFlight = true;
+      try {
+        cleanupResult = await runVslCapacityCleanup(
+          apiBase,
+          teamId,
+          token,
+          plan.leaveIds,
+          state.channels
+        );
+        if (cleanupResult.left > 0) {
+          try {
+            state = await fetchState(apiBase, teamId, token);
+          } catch (e) {
+            console.warn("[auto-sort] API fetch failed after VSL cleanup:", e.message);
+          }
+        }
+      } finally {
+        vslCleanupInFlight = false;
+      }
+    }
+
+    const sortResult = await sortPass(apiBase, teamId, token, state.sections, state.channels);
+    const deferred = (sortResult && sortResult.deferred) || [];
+    if (cleanupResult) {
+      const waiting = deferred
+        .filter((d) => String(d.section || "").toLowerCase() === VSL_CAPACITY_SECTION)
+        .reduce((n, d) => n + d.n, 0);
+      publishLastResult({
+        kind: "cleanup",
+        section: "VSL",
+        left: cleanupResult.left,
+        failed: cleanupResult.failed.length,
+        stoppedOnRateLimit: cleanupResult.stoppedOnRateLimit,
+        waiting,
+        limit: SECTION_CHANNEL_LIMIT,
+      });
+    } else if (deferred.length) {
+      const vsl = deferred.find((d) => String(d.section || "").toLowerCase() === VSL_CAPACITY_SECTION) || deferred[0];
+      const result = {
+        kind: "full",
+        section: vsl.section,
+        waiting: vsl.n,
+        limit: SECTION_CHANNEL_LIMIT,
+      };
+      if (plan.skipReason) {
+        result.skipReason = plan.skipReason;
+        if (plan.eligibleCount != null) result.eligibleCount = plan.eligibleCount;
+        if (plan.requiredBatch != null) result.requiredBatch = plan.requiredBatch;
+      }
+      publishLastResult(result);
+    }
 
     let countsById = null;
     if (
@@ -815,7 +1003,8 @@
           (m.attributeName === ATTR_RULES ||
             m.attributeName === ATTR_AUTOREAD ||
             m.attributeName === ATTR_AUTOREAD_INVITES ||
-            m.attributeName === ATTR_AUTOREAD_BROADCASTS)
+            m.attributeName === ATTR_AUTOREAD_BROADCASTS ||
+            m.attributeName === ATTR_VSL_CAPACITY_CLEANUP)
         ) {
           console.log("[auto-sort] Config updated; re-running.");
           // Reset session caches so newly-added prefixes get scanned.
@@ -833,6 +1022,7 @@
         ATTR_AUTOREAD,
         ATTR_AUTOREAD_INVITES,
         ATTR_AUTOREAD_BROADCASTS,
+        ATTR_VSL_CAPACITY_CLEANUP,
       ],
     });
 
@@ -854,6 +1044,16 @@
     setInterval(() => pollOnce(apiBase, teamId, token, myUserId), POLL_INTERVAL_MS);
   }
 
-  init();
-  if (globalThis.__SLACK_AUTOSORT_TEST__) globalThis.__slackAutoSortTestHooks = { selectInviteTarget, selectBroadcastTarget, forwardOnly, isBroadcast };
+  if (globalThis.__SLACK_AUTOSORT_TEST__) {
+    globalThis.__slackAutoSortTestHooks = {
+      selectInviteTarget,
+      selectBroadcastTarget,
+      forwardOnly,
+      isBroadcast,
+      planVslCapacityCleanup,
+      pollOnce,
+    };
+  } else {
+    init();
+  }
 })();
